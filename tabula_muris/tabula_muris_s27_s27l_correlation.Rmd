@@ -1,0 +1,232 @@
+---
+title: "Tabula Muris S27 S27L correlation"
+output: html_notebook
+---
+
+```{r}
+rm(list=ls())
+
+### PACKAGES
+library(gplots)
+library(ggplot2)
+library(stats)
+library(matrixStats)
+library(grDevices)
+library(RColorBrewer)
+
+
+### DIRECTORIES
+root_dir = "/Users/adelexu/Google Drive/PhD/S27L_manuscript/source_data/analysis_plotting_code"
+project_dir = file.path(root_dir, "tabula_muris")
+input_dir = file.path(project_dir, "data")
+output_dir = file.path(project_dir, "results")
+
+
+### INPUT FILES
+rp_annotation_file = file.path(input_dir, "rp_annotation.tsv")
+# manually curated list of RPs. Includes RP paralogs with previously reported expression but not RP pseudogenes
+
+cell_annotation_file = file.path(input_dir, "annotations_facs.csv")
+# annotations_facs.csv was downloaded from https://figshare.com/articles/dataset/Single-cell_RNA-seq_data_from_Smart-seq2_sequencing_of_FACS_sorted_cells_v2_/5829687:
+
+```
+
+```{r}
+# get counts file for each tissue
+
+# counts files were downloaded from https://figshare.com/articles/dataset/Single-cell_RNA-seq_data_from_Smart-seq2_sequencing_of_FACS_sorted_cells_v2_/5829687:
+
+# Aorta-counts.csv
+# Bladder-counts.csv
+# Brain_Myeloid-counts.csv
+# Brain_Non-Myeloid-counts.csv
+# Diaphragm-counts.csv
+# Fat-counts.csv
+# Heart-counts.csv
+# Kidney-counts.csv
+# Large_Intestine-counts.csv
+# Limb_Muscle-counts.csv
+# Liver-counts.csv
+# Lung-counts.csv
+# Mammary_Gland-counts.csv
+# Marrow-counts.csv
+# Pancreas-counts.csv
+# Skin-counts.csv
+# Spleen-counts.csv
+# Thymus-counts.csv
+# Tongue-counts.csv
+# Trachea-counts.csv
+
+counts_file_list <- list.files(path=input_dir, pattern="*-counts.csv", full.names=FALSE)
+```
+
+
+```{r}
+# read and format RP annotation file (only done once for all the tissues)
+rp_annotation <- read.table(file=rp_annotation_file, header=TRUE, sep='\t')
+
+# Rack1 and Rps3a1 have alternative names -- Rack1 is Gnb2l1, Rps3a1 is just Rps3a. Editing rp_annotation to match.
+rp_annotation$gene.name <- sub("Rack1", "Gnb2l1", rp_annotation$gene.name)
+rp_annotation$gene.name <- sub("Rps3a1", "Rps3a", rp_annotation$gene.name)
+rp_annotation$gene.name.of.canonical <- sub("Rack1", "Gnb2l1", rp_annotation$gene.name.of.canonical)
+rp_annotation$gene.name.of.canonical<- sub("Rps3a1", "Rps3a", rp_annotation$gene.name.of.canonical)
+rownames(rp_annotation) <- rp_annotation$gene.name
+```
+
+```{r}
+# initialize blank all_tissue_stats for collecting stats from each tissue
+
+all_tissue_stats = data.frame(cell_type=character(), 
+                           tissue=character(),
+                           ncells=numeric(),
+                           total_counts=numeric(),
+                           total_rp_counts=numeric(),
+                           S27_counts=numeric(),
+                           S27L_counts=numeric(),
+                           S27_stoich=numeric(),
+                           S27L_stoich=numeric())
+```
+
+
+```{r}
+for (counts_file in counts_file_list) {
+  
+  print(counts_file)
+  
+  # read and format the count file
+  counts <- read.csv(file=file.path(input_dir, counts_file), header=TRUE)
+  rownames(counts) <- counts$X
+  counts$X <- NULL
+  
+  # read and format cell annotation file
+  cell_annotation <- read.csv(file=cell_annotation_file, header=TRUE)
+  rownames(cell_annotation) <- cell_annotation$cell
+  
+  print("number of cells in both counts and cell annotation:")
+  print(sum(colnames(counts) %in% cell_annotation$cell))
+
+  # are all genes of interest in counts?
+  print("number of genes present:")
+  print(nrow(rp_annotation[rp_annotation$gene.name %in% rownames(counts),]))
+  
+  print("number of canonical genes missing:")
+  print(sum(rp_annotation[!(rp_annotation$gene.name %in% rownames(counts)),"is.canonical"]))
+  
+  # trim cell_annotation, counts, and rp_annotation to only active genes (present in both counts & rp_annotation) and active cells (present in both counts & cell_annotation)
+  active_genes <- intersect(rp_annotation$gene.name, rownames(counts))
+  active_cells <- intersect(cell_annotation$cell, colnames(counts))
+  
+  cell_annotation <- droplevels(cell_annotation[active_cells,])
+  rp_annotation <- droplevels(rp_annotation[active_genes,])
+  
+  tissue_name <- sub("-counts.csv", "", counts_file)
+  cell_types <- as.vector(unique(cell_annotation$cell_ontology_class))
+  
+  tissue_stats <- data.frame(cell_type=cell_types, 
+                             tissue=rep(tissue_name, length(cell_types)),
+                             ncells=rep(0, length(cell_types)),
+                             total_counts=rep(0, length(cell_types)),
+                             total_rp_counts=rep(0, length(cell_types)),
+                             S27_counts=rep(0, length(cell_types)),
+                             S27L_counts=rep(0, length(cell_types)))
+  
+  for(i in 1:length(cell_types)) {
+    
+    is_cell_type <- cell_annotation$cell_ontology_class==cell_types[i]
+    
+    # number of cells
+    cells_of_type <- cell_annotation[is_cell_type, "cell"]
+    tissue_stats[i,"ncells"] <- length(cells_of_type)
+    
+    # total counts
+    tissue_stats[i,"total_counts"] <- sum(counts[,is_cell_type])
+    
+    # total RP counts
+    tissue_stats[i,"total_rp_counts"] <- sum(counts[active_genes,is_cell_type])
+    
+    # S27 counts
+    tissue_stats[i,"S27_counts"] <- sum(counts["Rps27",is_cell_type])
+    
+    # S27L counts
+    tissue_stats[i,"S27L_counts"] <- sum(counts["Rps27l",is_cell_type])
+  
+    # S27 stoich
+    tissue_stats$S27_stoich <- tissue_stats$S27_counts/tissue_stats$total_rp_counts*100
+    
+    # S27L stoich
+    tissue_stats$S27L_stoich <- tissue_stats$S27L_counts/tissue_stats$total_rp_counts*100
+  }
+  
+  all_tissue_stats = rbind(all_tissue_stats, tissue_stats)
+}
+
+```
+
+```{r}
+write.csv(all_tissue_stats, file= file.path(output_dir, "all_tissue_stats.csv"), quote=FALSE)
+save(all_tissue_stats, file=file.path(output_dir, "all_tissue_stats.Robject"))
+```
+
+```{r}
+all_tissue_stats = all_tissue_stats[all_tissue_stats$ncells > 50,]
+```
+
+
+```{r}
+# assign colors to cell types
+
+cell_type_colors = rep('black', nrow(all_tissue_stats))
+cell_type_colors[all_tissue_stats$cell_type == "hepatocyte"] = "#009E73"
+
+cell_type_colors[all_tissue_stats$cell_type %in% c("B cell",
+                                                   "T cell",
+                                                   "natural killer cell",
+                                                   "leukocyte",
+                                                   "late pro-B cell",
+                                                   "naive B cell",
+                                                   "immature T cell",
+                                                   "pre-natural killer cell",
+                                                   "mature natural killer cell",
+                                                   "immature natural killer cell",
+                                                   "regulatory T cell",
+                                                   "immature NK T cell",
+                                                   "DN1 thymic pro-T cell")] = "#56B4E9"
+
+```
+
+```{r}
+# label cell types by text
+pdf(file=file.path(output_dir, "S27_vs_S27L_stoich_tabula_muris_text_labels.pdf"), width=10, height=10)
+# S27 stoich vs S27L stoich
+par(pty='s')
+plot(x = all_tissue_stats$S27_stoich,
+     y = all_tissue_stats$S27L_stoich,
+     pch = 19,
+     col = cell_type_colors,
+     xlab="eS27",
+     ylab="eS27L")
+text(x = all_tissue_stats$S27_stoich,
+     y = all_tissue_stats$S27L_stoich,
+     labels = paste(all_tissue_stats$cell_type, all_tissue_stats$tissue))
+dev.off()
+```
+
+```{r}
+
+pdf(file=file.path(output_dir, "S27_vs_S27L_stoich_tabula_muris.pdf"), width=4, height=4)
+# S27 stoich vs S27L stoich
+par(pty='s')
+plot(x = all_tissue_stats$S27_stoich,
+     y = all_tissue_stats$S27L_stoich,
+     pch = 19,
+     col = cell_type_colors,
+     xlab="eS27",
+     ylab="eS27L")
+
+dev.off()
+```
+
+```{r}
+cor.test(all_tissue_stats$S27_stoich, all_tissue_stats$S27L_stoich)
+```
+

@@ -1,0 +1,207 @@
+---
+title: "Fu bulk mammary RNA-seq"
+output: html_notebook
+---
+
+```{r}
+rm(list=ls())
+
+### PACKAGES
+library(gplots)
+library(ggplot2)
+library(stats)
+library(matrixStats)
+library(grDevices)
+library(RColorBrewer)
+library(dplyr)
+library(ggpubr)
+
+### DIRECTORIES
+root_dir = "/Users/adelexu/Google Drive/PhD/S27L_manuscript/source_data/analysis_plotting_code"
+project_dir = file.path(root_dir, "fu_bulk_mammary")
+input_dir = file.path(project_dir, "data")
+output_dir = file.path(project_dir, "results")
+
+### INPUT FILES
+gene_annotation_file = file.path(input_dir, "gene_annotations_20180615.txt") 
+# downloaded from Ensembl, restricted to genes w/ NCBI gene IDs, contains gene stable IDs (Ensembl IDs), gene names, NCBI/Entrez gene IDs
+
+rp_annotation_file = file.path(input_dir, "rp_annotation.tsv")
+# manually curated
+
+gene_counts_file = file.path(input_dir, "GSE60450_Lactation-GenewiseCounts.txt")
+# downloaded from Fu et al 2015 GSE60450
+
+```
+
+```{r}
+### READ INPUTS
+gene_annotation = read.table(file = gene_annotation_file, header=TRUE, sep='\t')
+rp_annotation = read.table(file = rp_annotation_file, header=TRUE, sep='\t')
+gene_counts = read.table(file = gene_counts_file, header=TRUE, sep='\t')
+```
+
+```{r}
+# truncate gene_annotation to genes present in the dataset
+gene_annotation <- gene_annotation[gene_annotation$NCBI.gene.ID %in% gene_counts$EntrezGeneID,]
+```
+
+```{r}
+# examine for duplicated entries in gene_annotation
+gene_annotation[duplicated(gene_annotation$NCBI.gene.ID),] #368 duplicated NCBI/Entrez IDs, none of which look particularly important...
+sum(duplicated(gene_annotation$Gene.stable.ID)) # 136 duplicated gene_annotation IDs
+sum(gene_annotation$NCBI.gene.ID %in% gene_counts$EntrezGeneID) #21280
+```
+
+```{r}
+# check which genes are present in dataset
+sum(rp_annotation$gene.id %in% gene_annotation$Gene.stable.ID) # only 87 of the RP genes have an NCBI ID
+sum(rp_annotation$gene.name %in% gene_annotation$Gene.name) # again, 87 of the RP genes are in the gene_annotation list by gene name
+rp_annotation[!(rp_annotation$gene.id %in% gene_annotation$Gene.stable.ID),] # only Rps4l is not present
+```
+
+```{r}
+# truncate RP annotation to those present in gene annotation
+rp_annotation_ncbi <- rp_annotation[rp_annotation$gene.id %in% gene_annotation$Gene.stable.ID,]
+table(rp_annotation_ncbi$is.canonical) # all 80 t1 genes present
+```
+
+```{r}
+# truncate gene_annotation to RP genes that also have an NCBI id - results in 92 entries
+gene_annotation <- gene_annotation[gene_annotation$Gene.stable.ID %in% rp_annotation_ncbi$gene.id,] 
+```
+
+
+```{r}
+# examine extraneous entries in gene_annotation
+gene_annotation[duplicated(gene_annotation$Gene.stable.ID),]
+#           Gene.stable.ID Gene.name NCBI.gene.ID
+# 3899  ENSMUSG00000047675      Rps8    100040298
+# 7544  ENSMUSG00000062006     Rpl34       619547
+# 7545  ENSMUSG00000062006     Rpl34    100043876
+# 8105  ENSMUSG00000048758     Rpl29       666642
+# 14497 ENSMUSG00000041841     Rpl37    100502825
+
+gene_annotation[duplicated(gene_annotation$Gene.name),]
+#           Gene.stable.ID Gene.name NCBI.gene.ID
+# 3899  ENSMUSG00000047675      Rps8    100040298
+# 7544  ENSMUSG00000062006     Rpl34       619547
+# 7545  ENSMUSG00000062006     Rpl34    100043876
+# 8105  ENSMUSG00000048758     Rpl29       666642
+# 14497 ENSMUSG00000041841     Rpl37    100502825
+
+gene_annotation[duplicated(gene_annotation$NCBI.gene.ID),]
+#none 
+
+sum(gene_annotation$NCBI.gene.ID %in% gene_counts$EntrezGeneID) 
+# 92 --> all of the entries in the gene_annotation list are in the database, even the redundant ones...
+```
+
+```{r}
+gene_counts$EntrezGeneID <- paste0("ncbi_", gene_counts$EntrezGeneID)
+rownames(gene_counts) <- gene_counts$EntrezGeneID
+gene_counts$EntrezGeneID <- NULL
+gene_counts$Length <- NULL
+
+gene_annotation$NCBI.gene.ID <- paste("ncbi_", gene_annotation$NCBI.gene.ID, sep="")
+
+# Make a counts table truncated to RP genes for easier analysis later
+gene_counts_rp <- gene_counts[gene_annotation$NCBI.gene.ID,]
+
+plot(gene_counts_rp$luminal.lactation.d2.1, gene_counts_rp$luminal.lactation.d2.2, main="Raw read counts") # very tightly correlated between replicates...that's good!
+```
+```{r}
+# calculate total transcripts, total rp transcripts, S27 counts, S27L counts
+gene_counts <- data.matrix(gene_counts)
+gene_counts_rp <- data.matrix(gene_counts_rp)
+
+sample_stats <- data.frame(sample.name=colnames(gene_counts))
+rownames(sample_stats) <- sample_stats$sample.name
+
+sample_stats$total_counts <- colSums(gene_counts)
+sample_stats$total_rp_counts <- colSums(gene_counts_rp)
+
+S27_ncbi <- gene_annotation[gene_annotation$Gene.name=="Rps27","NCBI.gene.ID"]
+S27L_ncbi <- gene_annotation[gene_annotation$Gene.name=="Rps27l","NCBI.gene.ID"]
+Csn2_ncbi <- "ncbi_12991"
+Cdkn1a_ncbi <- "ncbi_12575"
+
+sample_stats$S27_counts <- gene_counts[S27_ncbi,]
+sample_stats$S27L_counts <- gene_counts[S27L_ncbi,]
+sample_stats$Csn2_counts <- gene_counts[Csn2_ncbi,]
+sample_stats$Cdkn1a_counts <- gene_counts[Cdkn1a_ncbi,]
+
+# calculate cpm, stoich, ratio
+sample_stats$S27_cpm <- sample_stats$S27_counts/sample_stats$total_counts*1000000
+sample_stats$S27L_cpm <- sample_stats$S27L_counts/sample_stats$total_counts*1000000
+sample_stats$Csn2_cpm <- sample_stats$Csn2_counts/sample_stats$total_counts*1000000
+sample_stats$Cdkn1a_cpm <- sample_stats$Cdkn1a_counts/sample_stats$total_counts*1000000
+
+sample_stats$S27_stoich <- sample_stats$S27_counts/sample_stats$total_rp_counts*100
+sample_stats$S27L_stoich <- sample_stats$S27L_counts/sample_stats$total_rp_counts*100
+
+sample_stats$S27L_S27_ratio <- sample_stats$S27L_counts/sample_stats$S27_counts
+
+sample_stats$condition <- sub("\\.[[:digit:]]$", "", sample_stats$sample.name)
+
+sample_stats$condition <- factor(sample_stats$condition, levels=c("basal.virgin",
+                                                                  "basal.pregnant.d18.5",
+                                                                  "basal.lactation.d2",
+                                                                  "luminal.virgin",
+                                                                  "luminal.pregnant.d18.5",
+                                                                  "luminal.lactation.d2"))
+sample_stats$cell.type <- c(rep("basal", 6), rep("luminal", 6))
+
+write.csv(sample_stats, file= file.path(output_dir, "2018.11.14.fu.S27L.stats.csv"), quote=FALSE)
+```
+
+
+```{r}
+sample_stats_luminal = sample_stats[sample_stats$cell.type == "luminal",]
+conditions_long = c("luminal.virgin",
+                    "luminal.pregnant.d18.5",
+                    "luminal.lactation.d2")
+conditions_for_plot = c("NP", "PD18", "LD2")
+sample_stats_luminal$condition_for_plot = factor(sample_stats_luminal$condition, 
+                                                 levels = conditions_long, 
+                                                 labels=conditions_for_plot)
+```
+
+```{r}
+luminal_palette = c("gray50", "#E69F00", "#D55E00")
+
+plot_format = stat_compare_means(ref.group = "NP", 
+                                 label = "p.format", 
+                                 method = "t.test",
+                                 size = 5) 
+
+# plot for S27
+pdf(file = file.path(output_dir, "S27_stoich_luminal.pdf"), height=4, width=2.5)
+
+S27_plot = ggbarplot(sample_stats_luminal, 
+                     x = "condition_for_plot", y = "S27_stoich",
+                     add = c("mean_se", "jitter"),
+                     fill = "condition_for_plot", palette = luminal_palette)
+
+plot(S27_plot
+     + plot_format 
+     + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1)))
+
+dev.off()
+
+
+# plot for S27L
+pdf(file = file.path(output_dir, "S27L_stoich_luminal.pdf"), height=4, width=2.5)
+
+S27L_plot = ggbarplot(sample_stats_luminal,
+                      x = "condition_for_plot",
+                      y = "S27L_stoich",
+                      add = c("mean_se", "jitter"),
+                      fill = "condition_for_plot", palette = luminal_palette) + plot_format + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1))
+plot(S27L_plot
+     + plot_format 
+     + theme(axis.text.x = element_text(angle = 45, hjust=1, vjust=1)))
+
+dev.off()
+
+```

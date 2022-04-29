@@ -1,0 +1,129 @@
+---
+title: "Remove ambiguous cell type assignments"
+output: html_notebook
+---
+
+```{r}
+rm(list=ls())
+
+### DIRECTORIES
+root_dir = "/Users/adelexu/Google Drive/PhD/S27L_manuscript/source_data/analysis_plotting_code"
+project_dir = file.path(root_dir, "mouse_cell_atlas")
+input_dir = file.path(project_dir, "data")
+output_dir = file.path(project_dir, "data")
+
+
+### INPUT FILES
+cell_annotation_original_file = file.path(input_dir, "MCA_CellAssignments.csv")
+dge_file = file.path(input_dir, "Figure2_batch_removed_subset.Robject")
+
+### OUTPUT FILES
+mismatched_tissues_vs_annotation_file = file.path(output_dir, "anno_mismatched_tissues_vs_annotations.csv")
+cell_annotation_corrected_file = file.path(output_dir, "cell_annotation.Robject")
+
+### READ IN INPUT FILES
+cell_annotation_original <- read.csv(file=cell_annotation_original_file, header=TRUE)
+
+# make copy of original annotations
+cell_annotation <- cell_annotation_original
+cell_annotation$cell_name_fixed <- paste(cell_annotation$Batch, cell_annotation$Cell.Barcode, sep=".")
+```
+
+```{r}
+# how many cells total?
+nrow(cell_annotation)
+```
+
+```{r}
+# for how many cells does the original cell name match the fixed one?
+nrow(cell_annotation) - sum(cell_annotation$Cell.name==cell_annotation$cell_name_fixed)
+```
+
+```{r}
+# which tissues are affected?
+table(cell_annotation$Tissue[cell_annotation$Cell.name!=cell_annotation$cell_name_fixed])
+```
+
+```{r}
+anno.mismatched <- droplevels(cell_annotation[cell_annotation$Cell.name!=cell_annotation$cell_name_fixed,])
+# observed that for fetal kidney, the barcodes actually match but the original cell name just says "Kidney" not "Fetal_Kidney"
+
+# check if any annotations are mixed up between tissues?
+write.csv(table(anno.mismatched$Tissue, anno.mismatched$Annotation), file=mismatched_tissues_vs_annotation_file, quote=FALSE)
+# doesn't look like any cell types include cells from more than 1 tissue, so probably fine.
+```
+
+```{r}
+# check DGE to see whether naming is "Kidney" or "Fetal_Kidney"
+load(dge_file)
+length(grep("Kidney", colnames(dge), ignore.case=TRUE))
+# 3000 -- each tissue should be represented by 1500 cells here, so they probably did name both fetal & adult kidney as "Kidney"
+```
+
+```{r}
+# renaming the "Fetal_Kidney" cells to "Kidney" to match DGE
+cell_annotation$cell_name_fixed <- sub(pattern = "^Fetal_Kidney", replacement = "Kidney", cell_annotation$cell_name_fixed)
+
+# check how many mismatches we have now
+nrow(cell_annotation) - sum(cell_annotation$Cell.name==cell_annotation$cell_name_fixed)
+# 28684, down from 38079 -- so we solved the issue for 9395 but there are 9432 kidney cells...what happened?
+```
+
+```{r}
+# which tissues are affected now?
+table(cell_annotation$Tissue[cell_annotation$Cell.name!=cell_annotation$cell_name_fixed])
+# 37 fetal kidney cells still affected
+```
+
+```{r}
+# look at mismatched cells again
+anno.mismatched <- droplevels(cell_annotation[cell_annotation$Cell.name!=cell_annotation$cell_name_fixed,])
+# all the fetal kidney cells that are still mismatched have a "1" at the end of their original cell name -- suspect this is because there was an adult kidney cell w/ the same barcode. checking DGE for "Kidney_2.AAGCGGAAAACGCACAAG1" (although this cell might not have gotten included in the smaller set of cells that was selected for Figure2-batch-removed.txt
+grep("Kidney_2.AAGCGGAAAACGCACAAG1", colnames(dge)) #nope
+```
+
+```{r}
+# not  sure if putting the 1 at the end will get the fetal kidney cells to match up with the DGE, but I need to do something in order to make the cell names unique such that I can use them as row names -- so I'm going to add a 1 at the end
+
+for(i in which(cell_annotation$Cell.name!=cell_annotation$cell_name_fixed & cell_annotation$Tissue=="Fetal_Kidney")) {
+  cell_annotation[i,"cell_name_fixed"] <- paste(cell_annotation[i,"cell_name_fixed"], "1", sep="")
+}
+
+# check #mismatched again
+nrow(cell_annotation) - sum(cell_annotation$Cell.name==cell_annotation$cell_name_fixed)
+# 28647
+```
+
+```{r}
+# check mismatched tissues again
+table(cell_annotation$Tissue[cell_annotation$Cell.name!=cell_annotation$cell_name_fixed])
+# fetal kidney's all matched now
+```
+
+```{r}
+# rename columns, trim & save fixed anno
+colnames(cell_annotation) <- c("X", "wrong.cell.name", "ClusterID", "Tissue", "Batch", "Cell.Barcode", "Annotation", "fixed.cell.name")
+sum(table(cell_annotation$fixed.cell.name)>1)
+table(cell_annotation$Tissue[duplicated(cell_annotation$fixed.cell.name)])
+table(cell_annotation$Tissue)
+
+# 1288 mammary gland cells don't have unique names
+# 1248 involution cells out of the 4821 total
+# 32 lactation cells
+# 8 virgin cells
+# and it's not that the annotation rows are duplicated; MammaryGland.Involution_1.AAAACGCTCCATGTCGGT for example has two entries w/ different cell types.
+
+grep("MammaryGland.Involution_1.*1", colnames(dge))
+# not detecting any instances where 1 was added to the end of the duplicated names. Opting to remove the duplicated mammary cells. 
+```
+
+
+```{r}
+cell_annotation <- droplevels(cell_annotation[!duplicated(cell_annotation$fixed.cell.name),])
+# originally 270848 cells, down to 269560, so lost the 1288
+
+rownames(cell_annotation) <- cell_annotation$fixed.cell.name
+
+save(cell_annotation, file=cell_annotation_corrected_file)
+```
+

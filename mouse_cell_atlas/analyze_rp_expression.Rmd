@@ -1,0 +1,266 @@
+---
+title: "Analyze Mouse Cell Atlas"
+output: html_notebook
+---
+
+```{r}
+rm(list=ls())
+
+### PACKAGES
+library(gplots)
+library(ggplot2)
+library(stats)
+library(matrixStats)
+library(grDevices)
+library(RColorBrewer)
+
+
+### DIRECTORIES
+root_dir = "/Users/adelexu/Google Drive/PhD/S27L_manuscript/source_data/analysis_plotting_code"
+project_dir = file.path(root_dir, "mouse_cell_atlas")
+input_dir = file.path(project_dir, "data")
+output_dir = file.path(project_dir, "results")
+
+
+### INPUT FILES
+rp_annotation_file = file.path(input_dir, "rp_annotation.tsv")
+# manually curated list of RPs. Includes RP paralogs with previously reported expression but not RP pseudogenes
+
+dge_file = file.path(input_dir, "Figure2_batch_removed_subset.Robject")
+#Downloaded from Figshare; subsetted on SCG cluster for 409 RP genes, paralogs, or pseudogenes via the subset.dge.R script. loads an object called "dge", 409 obs of 61637 variables.
+
+cell_to_cluster_file = file.path(input_dir, "cell_to_cluster.txt")
+# for each cell barcode, the cluster number (out of 98 cross-tissue clusters)
+
+total_transcripts_per_cell_file = file.path(input_dir, "total_transcripts_per_cell.Robject")
+
+cell_annotation_file = file.path (input_dir, "cell_annotation.Robject")
+# annotation of all 269560 cells after dropping ones with duplicate annotations, object is called "cell_annotation"
+# saved after curation in remove_ambiguous_cell_type_assignments.Rmd
+
+cluster_annotation_file = file.path(input_dir, "cluster_annotation.csv")
+# human-readable name for each cluster number (out of 98 cross-tissue clusters)
+
+
+### OUTPUT FILES
+
+
+
+```
+
+```{r}
+### READ IN INPUT FILES
+rp_annotation = read.table(file=rp_annotation_file, header=TRUE, sep='\t')
+load(dge_file) 
+cell_to_cluster = read.table(cell_to_cluster_file, header=TRUE, sep='\t', row.names = 1)
+load(total_transcripts_per_cell_file)
+load(cell_annotation_file)
+cluster_annotation = read.csv(file=cluster_annotation_file, header=TRUE, col.names = c("cluster", "cell_type"))
+cluster_annotation$cluster = paste0("c", cluster_annotation$cluster)
+```
+
+```{r}
+# Survey RP annotations - 88 rows, 80 canonical RPs, 8 paralogs included
+table(rp_annotation$is.canonical)
+table(rp_annotation$gene.name.of.canonical)
+```
+
+
+```{r}
+# Define genes & cells that will be used here
+active_genes = rp_annotation$gene.name
+active_cells = Reduce(intersect, list(colnames(dge), rownames(cell_to_cluster), rownames(cell_annotation))) 
+# only include cells that are present in annotation file, in cell type assignment file, and in DGE -- 45952
+
+# Trim dge, cell_annotation, cell_to_cluster to active genes & cells
+dge = dge[active_genes,active_cells]
+cell_annotation = droplevels(cell_annotation[active_cells,])
+cell_to_cluster = droplevels(cell_to_cluster[active_cells,])
+colnames(cell_to_cluster) = c("cluster98", "tissue")
+cell_to_cluster$cluster98 = paste0("c", cell_to_cluster$cluster98)
+
+```
+
+```{r}
+#merge cell_to_cluster to cell_annotation
+cell_annotation = cbind(cell_annotation, cell_to_cluster)
+rm(ls=cell_to_cluster) # to avoid confusion
+
+# add rownames to rp_annotation
+rownames(rp_annotation) = rp_annotation$gene.name
+```
+
+```{r}
+cell_stats = data.frame(sum_rp_reads_per_cell = colSums(dge))
+```
+
+```{r}
+# sanity check plots, not for publication
+pdf(file=file.path(output_dir, "sum_rp_reads_per_cell.pdf"), width=6, height=6)
+hist(cell_stats$sum_rp_reads_per_cell, breaks=30, xlab="Sum of all RP reads", ylab="count")
+dev.off()
+
+pdf(file=file.path(output_dir, "sum_rp_reads_per_cell_log2.pdf"), width=6, height=6)
+hist(log2(cell_stats$sum_rp_reads_per_cell), breaks=30, xlab="log2(Sum of all RP reads)", ylab="count")
+dev.off()
+
+print("range of sum of all RP reads per cell:")
+print(range(cell_stats$sum_rp_reads_per_cell))
+print("mean of sum of all RP reads per cell:")
+print(mean(cell_stats$sum_rp_reads_per_cell))
+```
+
+```{r}
+gene_stats = data.frame(total_reads_per_rp = rowSums(dge))
+gene_stats
+```
+
+```{r}
+# survey number of clusters and number of cells per cluster
+length(unique(cell_annotation$cluster98))
+hist(table(cell_annotation$cluster98), breaks=100)
+min(table(cell_annotation$cluster98))
+
+# remove clusters with < 10 cells
+clusters_table = table(cell_annotation$cluster98)
+clusters_to_remove = names(clusters_table)[clusters_table<50]
+cells_to_remove = rownames(cell_annotation)[cell_annotation$cluster98 %in% clusters_to_remove]
+
+# update active cells, trim DGE, cell_annotation, and cell stats of cells to remove
+active_cells = setdiff(active_cells, cells_to_remove)
+dge = dge[active_genes,active_cells]
+rp_annotation = rp_annotation[active_genes,]
+cell_annotation = cell_annotation[active_cells,]
+cell_stats = cell_stats[active_cells,]
+
+clusters = unique(cell_annotation$cluster98)
+print("final # of clusters out of 98, after removing clusters with <10 cells")
+print(length(clusters))
+```
+
+
+```{r}
+# for all cells annotated to each cluster, pool reads for each RP gene. 
+rp_reads_pooled_per_cluster = matrix(0, nrow=length(active_genes), ncol=length(clusters))
+colnames(rp_reads_pooled_per_cluster) = clusters
+rownames(rp_reads_pooled_per_cluster) = active_genes
+for(i in 1:length(clusters)) {
+  print(paste(i, "Summarizing cluster number", clusters[i], sep = " "))
+  dge_subset = as.matrix(dge[,cell_annotation$cluster98==clusters[i]])
+  summed_reads_for_cluster = rowSums(dge_subset)
+  rp_reads_pooled_per_cluster[,clusters[i]] = summed_reads_for_cluster 
+}
+```
+
+```{r}
+#calculate total RP reads per cluster
+cluster_stats = data.frame(total_rp_reads_per_cluster=colSums(rp_reads_pooled_per_cluster))
+
+# calculate reads for each RP per 100 total RP reads per cluster
+# i.e. out of all the RP transcripts in each cluster, the % attributed to each RP gene
+rp_stoichiometry_pooled_per_cluster = t(1/cluster_stats$total_rp_reads_per_cluster * t(rp_reads_pooled_per_cluster))*100
+
+# add readable description to cluster numbers
+cluster_colnames = colnames(rp_stoichiometry_pooled_per_cluster)
+cluster_readable = paste0(plyr::mapvalues(cluster_colnames, from = cluster_annotation$cluster, to = cluster_annotation$cell_type), " (", cluster_colnames, ")")
+colnames(rp_stoichiometry_pooled_per_cluster) = cluster_readable
+write.csv(rp_stoichiometry_pooled_per_cluster, file = file.path(output_dir, "rp_stoichiometry_pooled_per_cluster.csv"), quote=FALSE)
+
+#heatmap normalized by total number of RP transcripts among the cells in the cluster, and then also scaled by the highest expressing cluster for each gene.
+rp_stoichiometry_pooled_per_cluster_gene_scaled = rp_stoichiometry_pooled_per_cluster/rowMaxs(rp_stoichiometry_pooled_per_cluster)
+
+# all RP genes, all cell types
+pdf(file=file.path(output_dir, "heatmap_rp_stoichiometry_pooled_per_cluster_gene_scaled.pdf"), width=8, height=12) 
+heatmap.2(t(rp_stoichiometry_pooled_per_cluster_gene_scaled), 
+          trace="none",
+          margins=c(5,5),
+          cexRow = 0.3, cexCol=0.3,
+          keysize = 1,
+          col=brewer.pal(11,"RdBu"))
+dev.off()
+```
+
+```{r}
+# S27 stoich vs S27L stoich, each cluster labeled by text
+pdf(file = file.path(output_dir, "S27_vs_S27L_stoich_text_labels.pdf"), width=10, height=10)
+plot(x = rp_stoichiometry_pooled_per_cluster['Rps27',],
+     y = rp_stoichiometry_pooled_per_cluster['Rps27l',],
+     pch = 19,
+     xlab = "eS27 read count\n(per 100 RP reads)",
+     ylab = "eS27L read count\n(per 100 RP reads)")
+
+text(x = rp_stoichiometry_pooled_per_cluster['Rps27',],
+     y = rp_stoichiometry_pooled_per_cluster['Rps27l',],
+     cluster_readable)
+
+dev.off()
+```
+
+
+```{r}
+cluster_colors = rep('black', length(cluster_readable))
+cluster_colors[cluster_readable=="Secretory alveoli cell (c18)"] = "#D55E00"
+cluster_colors[cluster_readable %in% c("Hepatocyte (c92)",
+                                       "Hepatocyte (c94)")] = "#009E73"
+cluster_colors[cluster_readable %in% c("NK cell (c63)",
+                                       "B cell (c72)",
+                                       "T cell (c3)",
+                                       "T cell (c8)",
+                                       "B cell (c24)",
+                                       "NK/T cell (c59)",
+                                       "T cell (c15)",
+                                       "B cell (c56)")] = "#56B4E9"
+```
+
+
+```{r}
+pdf(file=file.path(output_dir, "S27_vs_S27L_stoich.pdf"), width=4, height=4)
+
+# S27 stoich vs S27L stoich
+par(pty='s')
+plot(x = rp_stoichiometry_pooled_per_cluster['Rps27',],
+     y = rp_stoichiometry_pooled_per_cluster['Rps27l',],
+     pch = 19,
+     col = cluster_colors,
+     xlab="eS27",
+     ylab="eS27L")
+
+dev.off()
+
+```
+
+```{r}
+cor.test(rp_stoichiometry_pooled_per_cluster['Rps27',], rp_stoichiometry_pooled_per_cluster['Rps27l',])
+```
+
+```{r}
+# plot several cell types against average
+avg_rp_stoich_over_clusters = rowMeans(rp_stoichiometry_pooled_per_cluster)
+
+for (clust in cluster_readable) {
+  clust_for_filename = sub("/", "_", clust)
+  pdf(file=file.path(output_dir, paste0(clust_for_filename, "_stoich_vs_avg.pdf")), width=4, height=4)
+  par(pty='s')
+  plot(x = avg_rp_stoich_over_clusters,
+       y = rp_stoichiometry_pooled_per_cluster[,clust],
+       pch = 19,
+       main = clust,
+       xlab="Average of all cell types",
+       ylab=paste0("Read count per 100 RP reads"))
+  dev.off()
+}
+
+```
+
+```{r}
+cor.test(rp_stoichiometry_pooled_per_cluster[,"Chondrocyte (c11)"], avg_rp_stoich_over_clusters)
+```
+
+```{r}
+cor.test(rp_stoichiometry_pooled_per_cluster[,"Endothelial cell (c17)"], avg_rp_stoich_over_clusters)
+```
+
+```{r}
+cor.test(rp_stoichiometry_pooled_per_cluster[,"Macrophage (c25)"], avg_rp_stoich_over_clusters)
+```
+
